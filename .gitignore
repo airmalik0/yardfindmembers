@@ -38,6 +38,10 @@ data/analysis_results/*
 !data/profiles/.gitkeep
 !data/analysis_results/.gitkeep
 
+# ChromaDB (large generated files)
+data/chroma_db/
+data/embedding_scores/
+
 # IDE
 .vscode/
 .idea/
