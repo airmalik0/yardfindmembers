@@ -72,16 +72,15 @@ class MemberProfile(BaseModel):
         
         return md
     
-    def to_sheets_row(self, reasoning: str = "") -> List[str]:
-        """Конвертация профиля в строку для Google Sheets"""
+    def to_sheets_row(self) -> List[str]:
+        """Конвертация профиля в строку для Google Sheets (базовые поля)"""
         return [
             self.name,
             self.expertise,
             self.business,
             ", ".join(self.hobbies),
             self.family_status or "",
-            ", ".join(self.contacts),
-            reasoning  # Добавляем reasoning как последнее поле
+            ", ".join(self.contacts)
         ]
 
 
@@ -94,7 +93,8 @@ class AnalysisResult(BaseModel):
     """Результат анализа профиля"""
     profile_name: str
     matches: bool
-    reasoning: str = Field(..., description="Обоснование решения")
+    reasoning: str = Field(default="", description="Обоснование решения")
+    similarity_score: float = Field(default=0.0, description="Косинусная близость к критерию поиска")
     
 
 class WorkflowState(BaseModel):

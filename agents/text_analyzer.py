@@ -12,6 +12,7 @@ if str(parent_dir) not in sys.path:
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from utils.data_models import MemberProfile, AnalysisRequest, AnalysisResult, WorkflowState, sanitize_filename
+from utils.profile_loader import ProfileLoader
 from agents.embedding_agent import EmbeddingAgent
 import config
 
@@ -27,21 +28,37 @@ class TextAnalyzerAgent:
         )
         self.embedding_agent = EmbeddingAgent()
     
-    def analyze_profile(self, profile: MemberProfile, criteria: str) -> AnalysisResult:
-        """Анализ профиля на соответствие критериям"""
+    def analyze_profile(self, profile: MemberProfile, criteria: str, search_type: str = "professional") -> AnalysisResult:
+        """Анализ профиля на соответствие критериям
         
-        # Prepare profile text for analysis
-        profile_text = f"""
-        Имя: {profile.name}
-        Экспертиза: {profile.expertise}
-        Бизнес: {profile.business}
-        Хобби: {', '.join(profile.hobbies)}
-        Семейное положение: {profile.family_status or 'не указано'}
+        Args:
+            profile: Профиль для анализа
+            criteria: Критерии поиска
+            search_type: "professional" или "personal" - определяет какие поля анализировать
         """
         
-        # Create analysis prompt
-        system_prompt = """Ты эксперт по анализу бизнес-профилей.
-        Твоя задача - определить, соответствует ли профиль заданным критериям.
+        # Prepare profile text based on search type
+        if search_type == "personal":
+            # Для личного поиска - только личные данные
+            profile_text = f"""
+            Имя: {profile.name}
+            Хобби: {', '.join(profile.hobbies) if profile.hobbies else 'не указаны'}
+            Семейное положение: {profile.family_status or 'не указано'}
+            """
+            system_prompt = """Ты эксперт по анализу личных интересов и предпочтений.
+        Твоя задача - определить, соответствует ли профиль заданным личным критериям (хобби, семья)."""
+        else:
+            # Для профессионального поиска - бизнес данные
+            profile_text = f"""
+            Имя: {profile.name}
+            Экспертиза: {profile.expertise}
+            Бизнес: {profile.business}
+            """
+            system_prompt = """Ты эксперт по анализу бизнес-профилей.
+        Твоя задача - определить, соответствует ли профиль заданным профессиональным критериям."""
+        
+        # Добавляем формат JSON к промпту
+        system_prompt += """
         
         Верни результат СТРОГО в формате JSON:
         {
@@ -90,86 +107,67 @@ class TextAnalyzerAgent:
     
     def load_profile_by_name(self, name: str) -> Optional[MemberProfile]:
         """Загрузка профиля по имени"""
-        # Пробуем найти файл с этим именем
-        safe_name = name.replace(" ", "_")
-        json_file = config.PROFILES_DIR / f"{safe_name}.json"
-        
-        if json_file.exists():
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    profile_data = json.load(f)
-                    return MemberProfile(**profile_data)
-            except Exception as e:
-                print(f"Error loading profile {name}: {str(e)}", flush=True)
-        
-        # Если не нашли по точному имени, ищем во всех файлах
-        for json_file in config.PROFILES_DIR.glob("*.json"):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    profile_data = json.load(f)
-                    if profile_data.get("name") == name:
-                        return MemberProfile(**profile_data)
-            except Exception:
-                continue
-        
-        return None
+        return ProfileLoader.load_by_name(name)
     
-    def smart_analyze(self, criteria: str, search_type: str = "professional") -> List[AnalysisResult]:
+    def smart_analyze(self, criteria: str, search_type: str = "professional", top_k: int = 10) -> List[AnalysisResult]:
         """
         Умный анализ с использованием эмбеддингов
+        Анализирует топ-K профилей через LLM, но возвращает ВСЕ профили с их косинусной близостью
         
         Args:
             criteria: Критерии поиска
             search_type: "professional" или "personal"
+            top_k: Количество профилей для анализа через LLM (по умолчанию 10)
         """
         results = []
         
-        print(f"Searching with embeddings ({search_type} mode)...", flush=True)
+        print(f"Getting all profiles with similarity scores ({search_type} mode)...", flush=True)
         
-        # 1. Поиск топ-30 похожих профилей через эмбеддинги
-        similar_profiles = self.embedding_agent.search_similar(
+        # 1. Получаем ВСЕ профили с их косинусной близостью
+        all_profiles_with_scores = self.embedding_agent.get_all_profiles_with_scores(
             query=criteria,
-            search_type=search_type,
-            k=30,
-            save_all_scores=True  # Сохраняем все scores для анализа
+            search_type=search_type
         )
         
-        print(f"Found {len(similar_profiles)} candidates, analyzing with LLM...", flush=True)
+        print(f"Found {len(all_profiles_with_scores)} total profiles", flush=True)
         
-        # 2. Для каждого кандидата проверяем через LLM
-        for profile_name, score in similar_profiles:
+        # 2. Создаем словарь для быстрого доступа к scores
+        scores_dict = {name: score for name, score in all_profiles_with_scores}
+        
+        # 3. Анализируем только топ-K через LLM
+        top_k_for_llm = all_profiles_with_scores[:top_k]
+        analyzed_names = set()
+        
+        print(f"Analyzing top {len(top_k_for_llm)} candidates with LLM...", flush=True)
+        
+        for profile_name, similarity_score in top_k_for_llm:
             profile = self.load_profile_by_name(profile_name)
             
             if profile:
-                result = self.analyze_profile(profile, criteria)
+                result = self.analyze_profile(profile, criteria, search_type)
+                result.similarity_score = similarity_score  # Добавляем косинусную близость
                 results.append(result)
+                analyzed_names.add(profile_name)
                 
-                print(f"Analyzed {profile.name}: {'✓' if result.matches else '✗'} (similarity: {score:.2f})", flush=True)
+                print(f"Analyzed {profile.name}: {'✓' if result.matches else '✗'} (similarity: {similarity_score:.3f})", flush=True)
         
+        # 4. Добавляем все остальные профили БЕЗ анализа через LLM
+        print(f"Adding remaining {len(all_profiles_with_scores) - len(analyzed_names)} profiles without LLM analysis...", flush=True)
+        
+        for profile_name, similarity_score in all_profiles_with_scores:
+            if profile_name not in analyzed_names:
+                # Создаем результат без LLM анализа
+                result = AnalysisResult(
+                    profile_name=profile_name,
+                    matches=False,  # По умолчанию не подходит (не анализировали через LLM)
+                    reasoning="",  # Пустое обоснование (не анализировали)
+                    similarity_score=similarity_score
+                )
+                results.append(result)
+        
+        print(f"Total results: {len(results)} profiles", flush=True)
         return results
     
-    def batch_analyze(self, criteria: str) -> List[AnalysisResult]:
-        """Анализ всех сохраненных профилей"""
-        results = []
-        
-        # Load all profiles from JSON files
-        json_files = list(config.PROFILES_DIR.glob("*.json"))
-        
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    profile_data = json.load(f)
-                    profile = MemberProfile(**profile_data)
-                    
-                    result = self.analyze_profile(profile, criteria)
-                    results.append(result)
-                    
-                    print(f"Analyzed {profile.name}: {'✓' if result.matches else '✗'}", flush=True)
-                    
-            except Exception as e:
-                print(f"Error loading profile from {json_file}: {str(e)}", flush=True)
-        
-        return results
     
     def save_analysis_results(self, results: List[AnalysisResult], criteria: str) -> str:
         """Сохранение результатов анализа"""

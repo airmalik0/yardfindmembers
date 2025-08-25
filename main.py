@@ -10,7 +10,8 @@ from workflows.main_workflow import ProfileProcessingWorkflow, BatchProcessingWo
 from agents.text_analyzer import TextAnalyzerAgent
 from agents.embedding_agent import EmbeddingAgent
 from utils.sheets_manager import GoogleSheetsManager
-from utils.data_models import AnalysisRequest, MemberProfile
+from utils.data_models import AnalysisRequest, MemberProfile, AnalysisResult
+from utils.table_generator import TableGenerator
 import config
 
 console = Console()
@@ -88,24 +89,24 @@ def extract(image, directory, photos_dir):
 @click.option('--criteria', '-c', required=True, help='Search criteria (e.g., "связан с отелями")')
 @click.option('--search-type', type=click.Choice(['professional', 'personal']), 
               default='professional', help='Type of search: professional (business/expertise) or personal (hobbies/family)')
-@click.option('--use-embeddings/--no-embeddings', default=True, help='Use embeddings for faster search')
+@click.option('--top-k', '-k', type=click.IntRange(0, 100), default=10,
+              help='Number of profiles to analyze with AI (0-100, default: 10). 0 = no AI analysis, only similarity ranking')
 @click.option('--create-sheet', is_flag=True, help='Create Google Sheet with results')
-def analyze(criteria, search_type, use_embeddings, create_sheet):
+def analyze(criteria, search_type, top_k, create_sheet):
     """Analyze profiles based on criteria"""
     
     console.print(f"[cyan]Analyzing profiles with criteria: {criteria}[/cyan]")
-    if use_embeddings:
-        console.print(f"[cyan]Using embeddings search ({search_type} mode)[/cyan]")
+    console.print(f"[cyan]Using embeddings search ({search_type} mode)[/cyan]")
+    if top_k > 0:
+        console.print(f"[cyan]Analyzing top {top_k} profiles with AI[/cyan]")
+    else:
+        console.print(f"[cyan]No AI analysis - only similarity ranking[/cyan]")
     
     # Create analyzer
     analyzer = TextAnalyzerAgent()
     
-    # Choose analysis method
-    if use_embeddings:
-        results = analyzer.smart_analyze(criteria, search_type)
-    else:
-        # Fallback to old method (analyze all profiles)
-        results = analyzer.batch_analyze(criteria)
+    # Always use smart_analyze with embeddings
+    results = analyzer.smart_analyze(criteria, search_type, top_k)
     
     # Save results
     filepath = analyzer.save_analysis_results(results, criteria)
@@ -116,29 +117,17 @@ def analyze(criteria, search_type, use_embeddings, create_sheet):
     table.add_column("Match", style="white")
     table.add_column("Reasoning", style="white", width=50)
     
-    matching_profiles = []
-    reasoning_map = {}  # Map of profile name to reasoning
-    
+    # Display only analyzed profiles (those with reasoning)
     for result in results:
-        match_symbol = "✓" if result.matches else "✗"
-        match_color = "green" if result.matches else "red"
-        
-        table.add_row(
-            result.profile_name,
-            f"[{match_color}]{match_symbol}[/{match_color}]",
-            result.reasoning[:100] + "..." if len(result.reasoning) > 100 else result.reasoning
-        )
-        
-        if result.matches:
-            # Store reasoning for this profile
-            reasoning_map[result.profile_name] = result.reasoning
+        if result.reasoning:  # Only show profiles that were analyzed by LLM
+            match_symbol = "✓" if result.matches else "✗"
+            match_color = "green" if result.matches else "red"
             
-            # Load full profile for sheet creation
-            profile_path = config.PROFILES_DIR / f"{result.profile_name.replace(' ', '_')}.json"
-            if profile_path.exists():
-                with open(profile_path, 'r', encoding='utf-8') as f:
-                    profile_data = json.load(f)
-                    matching_profiles.append(MemberProfile(**profile_data))
+            table.add_row(
+                result.profile_name,
+                f"[{match_color}]{match_symbol}[/{match_color}]",
+                result.reasoning[:100] + "..." if len(result.reasoning) > 100 else result.reasoning
+            )
     
     console.print(table)
     
@@ -148,9 +137,14 @@ def analyze(criteria, search_type, use_embeddings, create_sheet):
     console.print(f"\n[bold]Summary:[/bold] {matched}/{total} profiles matched")
     
     # Create Google Sheet if requested
-    if create_sheet and matching_profiles:
+    if create_sheet and results:
         sheets_manager = GoogleSheetsManager()
-        spreadsheet_id = sheets_manager.create_analysis_sheet(matching_profiles, criteria, reasoning_map)
+        # Use the new format with AnalysisResult objects
+        spreadsheet_id = sheets_manager.create_analysis_sheet(
+            analysis_results=results,
+            criteria=criteria,
+            mode="professional"  # Could be made configurable
+        )
         if spreadsheet_id:
             console.print(f"[green]✓ Created Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}[/green]")
 
@@ -295,36 +289,37 @@ def sync_analysis(analysis_file):
             analysis_data = json.load(f)
         
         criteria = analysis_data.get("criteria", "Unknown")
-        results = analysis_data.get("results", [])
+        results_data = analysis_data.get("results", [])
         
-        # Filter matched profiles and build reasoning map
-        matched_profiles = []
-        reasoning_map = {}
+        # Convert to AnalysisResult objects
+        results = []
+        for result_dict in results_data:
+            # Handle both old and new formats
+            result = AnalysisResult(
+                profile_name=result_dict.get("profile_name", ""),
+                matches=result_dict.get("matches", False),
+                reasoning=result_dict.get("reasoning", ""),
+                similarity_score=result_dict.get("similarity_score", 0.0)  # May not exist in old files
+            )
+            results.append(result)
         
-        for result in results:
-            if result.get("matches"):
-                profile_name = result.get("profile_name")
-                reasoning = result.get("reasoning", "")
-                
-                # Store reasoning
-                reasoning_map[profile_name] = reasoning
-                
-                # Load full profile
-                profile_path = config.PROFILES_DIR / f"{profile_name.replace(' ', '_')}.json"
-                if profile_path.exists():
-                    with open(profile_path, 'r', encoding='utf-8') as f:
-                        profile_data = json.load(f)
-                        matched_profiles.append(MemberProfile(**profile_data))
-        
-        if not matched_profiles:
-            console.print("[yellow]No matched profiles found in this analysis[/yellow]")
+        if not results:
+            console.print("[yellow]No results found in this analysis[/yellow]")
             return
         
-        # Create Google Sheet
-        console.print(f"[cyan]Creating Google Sheet for {len(matched_profiles)} matched profiles...[/cyan]")
+        # Count matched profiles
+        matched_count = sum(1 for r in results if r.matches)
+        
+        # Create Google Sheet with ALL profiles (new format)
+        console.print(f"[cyan]Creating Google Sheet with {len(results)} profiles ({matched_count} matched)...[/cyan]")
         
         sheets_manager = GoogleSheetsManager()
-        spreadsheet_id = sheets_manager.create_analysis_sheet(matched_profiles, criteria, reasoning_map)
+        # Use the new method signature
+        spreadsheet_id = sheets_manager.create_analysis_sheet(
+            analysis_results=results,
+            criteria=criteria,
+            mode="professional"  # Default to professional, could be stored in analysis file
+        )
         
         if spreadsheet_id:
             console.print(f"[green]✓ Created Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}[/green]")

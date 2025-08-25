@@ -141,7 +141,7 @@ class EmbeddingAgent:
         Args:
             query: Текст запроса
             search_type: "professional" или "personal"
-            k: Количество результатов
+            k: Количество результатов (используется только когда return_all=False)
             save_all_scores: Сохранять ли все scores в файл
             
         Returns:
@@ -178,6 +178,49 @@ class EmbeddingAgent:
         
         return profile_scores
     
+    def get_all_profiles_with_scores(self, query: str, search_type: str = "professional", save_scores: bool = True) -> List[Tuple[str, float]]:
+        """
+        Получить ВСЕ профили с их косинусными scores
+        
+        Args:
+            query: Текст запроса
+            search_type: "professional" или "personal"
+            save_scores: Сохранять ли scores в файл для анализа
+            
+        Returns:
+            Список ВСЕХ профилей (имя_профиля, similarity_score от 0 до 1)
+        """
+        # Выбираем базу
+        db = self.professional_db if search_type == "professional" else self.personal_db
+        
+        # Получаем ВСЕ профили из базы
+        max_results = self._profile_count if hasattr(self, '_profile_count') else 1000
+        all_results = db.similarity_search_with_score(query, k=max_results)
+        
+        # Извлекаем имена и конвертируем scores
+        all_profile_scores = []
+        all_profile_scores_raw = []  # Для сохранения с оригинальными distance
+        seen_names = set()
+        
+        for doc, distance in all_results:
+            name = doc.metadata.get("name")
+            if name and name not in seen_names:
+                # Конвертируем distance в similarity (0 to 1)
+                # ChromaDB возвращает косинусное расстояние (0 = identical, 2 = opposite)
+                similarity = max(0, 1 - (distance / 2))
+                all_profile_scores.append((name, similarity))
+                all_profile_scores_raw.append((name, distance))  # Сохраняем оригинальное distance
+                seen_names.add(name)
+        
+        # Сортируем по убыванию similarity
+        all_profile_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Сохраняем scores в файл если нужно
+        if save_scores and all_profile_scores_raw:
+            self._save_embedding_scores(query, search_type, all_profile_scores_raw)
+        
+        return all_profile_scores
+    
     def _save_embedding_scores(self, query: str, search_type: str, scores: List[Tuple[str, float]]) -> None:
         """Сохранение всех embedding scores в файл для анализа"""
         from datetime import datetime
@@ -207,7 +250,7 @@ class EmbeddingAgent:
                     "rank": i + 1,
                     "name": name,
                     "score": float(score),
-                    "similarity_percent": max(0, (1 - float(score)) * 100)  # Конвертируем distance в similarity %
+                    "similarity_percent": max(0, (1 - float(score)/2) * 100)  # Конвертируем distance (0-2) в similarity %
                 }
                 for i, (name, score) in enumerate(sorted_scores)
             ]

@@ -12,6 +12,7 @@ import pickle
 from pathlib import Path
 import config
 from utils.data_models import MemberProfile
+from utils.table_generator import TableGenerator
 
 
 class GoogleSheetsManager:
@@ -147,8 +148,8 @@ class GoogleSheetsManager:
             print(f"An error occurred: {error}")
             return False
     
-    def create_analysis_sheet(self, profiles: List[MemberProfile], criteria: str, reasoning_map: Dict[str, str] = None) -> Optional[str]:
-        """Add a new sheet with analysis results to master spreadsheet"""
+    def create_analysis_sheet(self, analysis_results: List, criteria: str, mode: str = "professional") -> Optional[str]:
+        """Add a new sheet with analysis results to master spreadsheet using unified table generator"""
         if not self.service:
             print("Google Sheets not authenticated. Skipping sheets creation.")
             return None
@@ -181,15 +182,13 @@ class GoogleSheetsManager:
                 body={'requests': requests}
             ).execute()
             
-            # Prepare data with headers
-            values = [config.SHEETS_COLUMNS]  # Header row
-            
-            for profile in profiles:
-                # Get reasoning for this profile if available
-                reasoning = ""
-                if reasoning_map and profile.name in reasoning_map:
-                    reasoning = reasoning_map[profile.name]
-                values.append(profile.to_sheets_row(reasoning))
+            # Use TableGenerator to prepare data
+            values = TableGenerator.prepare_sheets_data(
+                analysis_results=analysis_results,
+                criteria=criteria,
+                mode=mode,
+                include_all_profiles=True  # Включаем все профили
+            )
             
             # Update the new sheet with data
             body = {'values': values}

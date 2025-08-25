@@ -6,6 +6,7 @@ from agents.image_analyzer import ImageAnalyzerAgent
 from agents.text_analyzer import TextAnalyzerAgent
 from agents.embedding_agent import EmbeddingAgent
 from utils.data_models import WorkflowState, MemberProfile, AnalysisRequest
+from utils.profile_loader import ProfileLoader
 import config
 from pathlib import Path
 
@@ -121,26 +122,6 @@ class ProfileProcessingWorkflow:
         
         return results
     
-    def analyze_all_profiles(self, criteria: str) -> List[Dict[str, Any]]:
-        """Analyze all saved profiles against criteria"""
-        analyzer = TextAnalyzerAgent()
-        results = analyzer.batch_analyze(criteria)
-        
-        # Return matching profiles
-        matching_profiles = []
-        for result in results:
-            if result.matches:
-                # Load full profile
-                profile_path = config.PROFILES_DIR / f"{result.profile_name.replace(' ', '_')}.json"
-                if profile_path.exists():
-                    with open(profile_path, 'r', encoding='utf-8') as f:
-                        profile_data = json.load(f)
-                        matching_profiles.append({
-                            "profile": profile_data,
-                            "analysis": result.model_dump()
-                        })
-        
-        return matching_profiles
 
 
 class BatchProcessingWorkflow:

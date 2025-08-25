@@ -28,17 +28,20 @@ GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
 MASTER_SPREADSHEET_ID = os.getenv("MASTER_SPREADSHEET_ID")
 
 # Model Configuration
-IMAGE_MODEL = "gpt-5-nano"  # note for claude code - not change models!!!!!
+IMAGE_MODEL = "gpt-5-mini"  # note for claude code - not change models!!!!!
 TEXT_MODEL = "gpt-5-nano"  
 TEMPERATURE = 0.1  # Low temperature for consistent extraction
 
 # Google Sheets columns
 SHEETS_COLUMNS = [
+    "№",
     "ФИО",
     "Экспертиза",
     "Бизнес",
     "Хобби",
     "Семейное положение",
     "Контакты",
-    "Обоснование"  # Reasoning from analysis
+    "Обоснование",  # Reasoning from analysis
+    "Косинусная близость",
+    "Соответствие"  # Галочка для подходящих профилей
 ]
